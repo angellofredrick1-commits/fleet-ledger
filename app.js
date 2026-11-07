@@ -17,11 +17,11 @@ const S = {
 const FIELDS = {
   vehicles:{plate:"plate",model:"model",year:"year",purchasePrice:"purchase_price",purchaseDate:"purchase_date",weeklyTarget:"weekly_target",status:"status",driverId:"driver_id",history:"history",notes:"notes",createdAt:"created_at"},
   drivers:{name:"name",phone:"phone",licenceNo:"licence_no",nida:"nida",deposit:"deposit",startDate:"start_date",status:"status",notes:"notes",createdAt:"created_at"},
-  entries:{type:"type",category:"category",amount:"amount",date:"date",vehicleId:"vehicle_id",driverId:"driver_id",note:"note",createdAt:"created_at"},
+  entries:{type:"type",category:"category",amount:"amount",date:"date",vehicleId:"vehicle_id",driverId:"driver_id",note:"note",distanceKm:"distance_km",createdAt:"created_at"},
   settings:{loanAmount:"loan_amount",rate:"rate",years:"years",startMonth:"start_month",breakEven:"break_even",defaultTarget:"default_target"}
 };
-const NUMERIC = new Set(["purchasePrice","weeklyTarget","deposit","amount","loanAmount","rate","years","breakEven","defaultTarget"]);
-const NULLABLE = new Set(["driver_id","vehicle_id","purchase_date","start_date"]);
+const NUMERIC = new Set(["purchasePrice","weeklyTarget","deposit","amount","loanAmount","rate","years","breakEven","defaultTarget","distanceKm"]);
+const NULLABLE = new Set(["driver_id","vehicle_id","purchase_date","start_date","distance_km"]);
 function toRow(table,obj){
   const map=FIELDS[table],row={};
   for(const k in map){
@@ -85,11 +85,23 @@ function weeksElapsed(){
   return days/7;
 }
 function sums(list){
-  let inc=0,exp=0,hes=0;const cats={};
-  for(const e of list){const a=num(e.amount);
-    if(e.type==="income"){inc+=a;if(e.category==="Weekly hesabu")hes+=a}
-    else{exp+=a;cats[e.category]=(cats[e.category]||0)+a}}
-  return{inc,exp,hes,cats};
+  let inc=0,exp=0,hes=0,km=0,kmInc=0,fines=0,acc=0;const cats={};
+  for(const e of list){const a=num(e.amount),d=num(e.distanceKm);
+    if(e.type==="income"){inc+=a;if(e.category==="Weekly hesabu")hes+=a;if(d>0){km+=d;kmInc+=a}}
+    else{exp+=a;cats[e.category]=(cats[e.category]||0)+a;if(e.category==="Traffic fine")fines++;if(e.category==="Accident")acc++}}
+  return{inc,exp,hes,cats,km,kmInc,fines,acc,net:inc-exp};
+}
+// profit margin = profit / earnings; null when nothing was earned
+function margin(profit,inc){return inc>0?profit/inc:null}
+function pctTxt(m){return m==null?"—":(m<0?"−":"")+Math.abs(m*100).toFixed(1)+"%"}
+function pctCls(m){return m==null?"muted":m<0?"neg":m<0.25?"warn-t":"pos"}
+// earnings per km only counts collections that had a distance logged
+function perKm(t){return t.km>0?t.kmInc/t.km:null}
+function kmTxt(km){return km>0?NF.format(Math.round(km))+" km":"—"}
+function lastKmHint(vid){
+  if(!vid)return ".";
+  const prev=S.entries.filter(e=>e.vehicleId===vid&&num(e.distanceKm)>0).sort(byDateDesc)[0];
+  return prev?`. Last logged: ${NF.format(num(prev.distanceKm))} km on ${fmtDate(prev.date)}.`:".";
 }
 function lastHesabu(vid){let best="";for(const e of S.entries)if(e.vehicleId===vid&&e.type==="income"&&e.category==="Weekly hesabu"&&e.date>best)best=e.date;return best}
 function activeVehicles(){return S.vehicles.filter(v=>v.status!=="inactive")}
@@ -203,11 +215,16 @@ function viewOverview(){
   const avg=wks>0?t.hes/(cars*wks):0,c=cfg();
   const target=activeVehicles().length?activeVehicles().reduce((a,v)=>a+(num(v.weeklyTarget)||c.defaultTarget),0)/activeVehicles().length:c.defaultTarget;
 
+  const opMargin=margin(t.net,t.inc),netMargin=margin(net,t.inc),pk=perKm(t);
+  const costKm=t.km>0?t.exp/t.km:null;
+
   let out=`<section class="kpis" aria-label="Summary for ${esc(periodName())}">
     <div class="kpi"><div class="eyebrow">Earnings</div><div class="v pos">${tsh(t.inc)}</div><div class="s">Hesabu ${tsh(t.hes)}</div></div>
     <div class="kpi"><div class="eyebrow">Expenses</div><div class="v neg">${tsh(t.exp)}</div><div class="s">${list.filter(e=>e.type==="expense").length} entries</div></div>
     <div class="kpi"><div class="eyebrow">Loan repayment</div><div class="v">${tsh(loan)}</div><div class="s">${S.period==="all"?loanPaidCount()+" months due so far":(loan?"Due this month":"Outside loan schedule")}</div></div>
     <div class="kpi net"><div class="eyebrow">Net profit</div><div class="v">${tsh(net)}</div><div class="s">${esc(periodName())}, after loan</div></div>
+    <div class="kpi"><div class="eyebrow">Profit margin</div><div class="v ${pctCls(netMargin)}">${pctTxt(netMargin)}</div><div class="s">After loan. Before loan: <span class="${pctCls(opMargin)}">${pctTxt(opMargin)}</span></div></div>
+    <div class="kpi"><div class="eyebrow">Distance covered</div><div class="v">${kmTxt(t.km)}</div><div class="s">${pk!=null?`${tsh(pk)} earned per km${costKm!=null?` · ${tsh(costKm)} cost per km`:""}`:"Add km from the GPS app when you record hesabu"}</div></div>
   </section>`;
 
   // hesabu gauge
@@ -219,7 +236,7 @@ function viewOverview(){
     <div class="gauge">
       <div class="gauge-track"><div class="gauge-fill ${avg<c.breakEven?"low":""}" style="width:${pct(avg)}%"></div>
         <div class="gauge-mark" style="left:${pct(c.breakEven)}%"><span>Break-even ${compact(c.breakEven)}</span></div>
-        <div class="gauge-mark" style="left:${pct(target)}%"><span>Target ${compact(target)}</span></div>
+        <div class="gauge-mark above" style="left:${pct(target)}%"><span>Target ${compact(target)}</span></div>
       </div><div class="gauge-labels"></div>
       <p class="status-line">${wks>0?`Average across ${activeVehicles().length} active car${activeVehicles().length===1?"":"s"} over ${wks.toFixed(1)} weeks. ${avg>=target?"On or above target.":avg>=c.breakEven?"Covering costs and loan, below target.":"Below break-even: the cars are not covering running costs and the loan."}`:"No weeks have passed in this period yet."}</p>
     </div>
@@ -227,14 +244,37 @@ function viewOverview(){
    <div class="panel"><div class="panel-head"><h2>Needs attention</h2></div>${alertsHTML()}</div>
   </section>`;
 
+  out+=`<section class="grid2"><div class="panel"><div class="panel-head"><h2>Top drivers</h2><span class="muted">${esc(periodName())}</span></div>${topDrivers(list)}</div>
+    <div class="panel"><div class="panel-head"><h2>Where the money went</h2><span class="muted">${esc(periodName())}</span></div>${catBars(t.cats)}</div></section>`;
+
   out+=`<section class="panel"><div class="panel-head"><h2>Last 12 months</h2><div class="legend"><span><i style="background:var(--good)"></i>Earnings</span><span><i style="background:var(--bad)"></i>Expenses</span><span><i style="background:var(--loan)"></i>Loan</span><span><i style="background:var(--accent);border-radius:50%"></i>Net</span></div></div><div class="chart-wrap">${chartSVG()}</div></section>`;
 
-  out+=`<section class="grid2"><div class="panel"><div class="panel-head"><h2>By vehicle</h2><span class="muted">${esc(periodName())}</span></div>${vehicleTable(list)}</div>
-    <div class="panel"><div class="panel-head"><h2>Where the money went</h2><span class="muted">${esc(periodName())}</span></div>${catBars(t.cats)}</div></section>`;
+  out+=`<section class="panel"><div class="panel-head"><h2>By vehicle</h2><span class="muted">${esc(periodName())}</span></div>${vehicleTable(list)}</section>`;
 
   const recent=[...S.entries].sort(byDateDesc).slice(0,6);
   out+=`<section class="panel"><div class="panel-head"><h2>Recent entries</h2><button class="btn small ghost" type="button" data-act="tab" data-tab="entries">See all</button></div>${recent.length?`<div class="entry-list">${recent.map(entryRow).join("")}</div>`:`<p class="muted">No entries yet.</p>`}</section>`;
   return out;
+}
+
+// Ranks drivers by what they brought in minus costs logged against them (fines, accidents, repairs)
+function driverStats(list){
+  const by={};
+  for(const e of list){if(!e.driverId)continue;(by[e.driverId]=by[e.driverId]||[]).push(e)}
+  return Object.keys(by).filter(id=>dById(id)).map(id=>{const t=sums(by[id]);return{id,t,m:margin(t.net,t.inc),pk:perKm(t)}})
+    .filter(r=>r.t.inc>0||r.t.exp>0).sort((a,b)=>b.t.net-a.t.net||b.t.hes-a.t.hes);
+}
+function topDrivers(list){
+  const rows=driverStats(list);
+  if(!rows.length)return `<p class="muted">No driver activity in this period yet. Rankings appear once you record hesabu.</p>`;
+  const top=rows[0],car=S.vehicles.find(v=>v.driverId===top.id);
+  let html=`<div class="top-driver">
+    <div class="rank1" aria-hidden="true">1</div>
+    <div style="min-width:0"><div class="eyebrow">Top driver</div><h3>${esc(dName(top.id))}</h3><div class="muted" style="font-size:.85rem">${car?esc(car.plate)+" · ":""}${top.t.fines||top.t.acc?`${top.t.fines} fine${top.t.fines===1?"":"s"}, ${top.t.acc} accident${top.t.acc===1?"":"s"}`:"No fines or accidents"}</div></div>
+    <div class="top-figs"><div><span class="eyebrow">Brought in</span><span class="num pos">${compact(top.t.net)}</span></div><div><span class="eyebrow">Margin</span><span class="num ${pctCls(top.m)}">${pctTxt(top.m)}</span></div><div><span class="eyebrow">Distance</span><span class="num">${kmTxt(top.t.km)}</span></div></div>
+  </div>`;
+  if(rows.length>1)html+=`<div class="tbl-wrap"><table><thead><tr><th>#</th><th>Driver</th><th class="r">Brought in</th><th class="r">Margin</th><th class="r">Km</th><th class="r">TSh/km</th></tr></thead><tbody>${rows.slice(0,5).map((r,i)=>`<tr><td class="num muted">${i+1}</td><td>${esc(dName(r.id))}${r.t.fines?` <span class="chip bad">${r.t.fines} fine${r.t.fines===1?"":"s"}</span>`:""}</td><td class="r num ${r.t.net>=0?"pos":"neg"}">${compact(r.t.net)}</td><td class="r num ${pctCls(r.m)}">${pctTxt(r.m)}</td><td class="r num">${r.t.km?NF.format(Math.round(r.t.km)):"—"}</td><td class="r num">${r.pk!=null?NF.format(Math.round(r.pk)):"—"}</td></tr>`).join("")}</tbody></table></div>`;
+  html+=`<p class="status-line" style="margin:10px 0 0">Ranked by what each driver brought in after costs logged against them: fines, accidents and repairs.</p>`;
+  return html;
 }
 function byDateDesc(a,b){return (b.date||"").localeCompare(a.date||"")||(b.createdAt||0)-(a.createdAt||0)}
 
@@ -260,15 +300,18 @@ function vehicleTable(list){
   if(!S.vehicles.length)return `<p class="muted">No vehicles yet.</p>`;
   const c=cfg(),wks=weeksElapsed();
   const rows=S.vehicles.map(v=>{
-    const t=sums(list.filter(e=>e.vehicleId===v.id));
+    const t=sums(list.filter(e=>e.vehicleId===v.id)),m=margin(t.net,t.inc),pk=perKm(t);
     const expct=v.status==="active"&&v.driverId?(num(v.weeklyTarget)||c.defaultTarget)*wks:0;
     const gap=t.hes-expct;
     return `<tr><td><span class="plate">${esc(v.plate)}</span>${v.example?' <span class="chip ex">Example</span>':""}<div class="muted" style="font-size:.82rem;margin-top:3px">${esc(dName(v.driverId))}</div></td>
       <td class="r num pos">${compact(t.inc)}</td><td class="r num neg">${compact(t.exp)}</td>
-      <td class="r num ${t.inc-t.exp>=0?"pos":"neg"}">${compact(t.inc-t.exp)}</td>
+      <td class="r num ${t.net>=0?"pos":"neg"}">${compact(t.net)}</td>
+      <td class="r num ${pctCls(m)}">${pctTxt(m)}</td>
+      <td class="r num">${t.km?NF.format(Math.round(t.km)):"—"}</td>
+      <td class="r num">${pk!=null?NF.format(Math.round(pk)):"—"}</td>
       <td class="r num">${expct?`<span class="${gap>=0?"pos":"neg"}">${gap>=0?"+":""}${compact(gap)}</span>`:'<span class="muted">—</span>'}</td></tr>`;
   }).join("");
-  return `<div class="tbl-wrap"><table><thead><tr><th>Car</th><th class="r">Earned</th><th class="r">Spent</th><th class="r">Net</th><th class="r" title="Hesabu collected minus weekly target for the weeks elapsed">vs target</th></tr></thead><tbody>${rows}</tbody></table></div><p class="status-line" style="margin:10px 0 0">Net here is before the loan. "vs target" compares hesabu collected with each car's weekly target.</p>`;
+  return `<div class="tbl-wrap"><table><thead><tr><th>Car</th><th class="r">Earned</th><th class="r">Spent</th><th class="r">Net</th><th class="r">Margin</th><th class="r">Km</th><th class="r">TSh/km</th><th class="r" title="Hesabu collected minus weekly target for the weeks elapsed">vs target</th></tr></thead><tbody>${rows}</tbody></table></div><p class="status-line" style="margin:10px 0 0">Net and margin here are before the loan. TSh/km uses collections that have a GPS distance logged.</p>`;
 }
 
 function catBars(cats){
@@ -323,8 +366,8 @@ function viewVehicles(){
         <dt>Last hesabu</dt><dd>${last?fmtDate(last)+` <span class="muted">(${daysSince(last)}d ago)</span>`:"—"}</dd>
         <dt>Bought</dt><dd>${v.purchasePrice?`<span class="num">${tsh(v.purchasePrice)}</span>`:"—"}${v.purchaseDate?", "+fmtDate(v.purchaseDate):""}</dd>
       </dl>
-      <div class="mini"><div><span class="eyebrow">Earned</span><span class="num pos">${compact(t.inc)}</span></div><div><span class="eyebrow">Spent</span><span class="num neg">${compact(t.exp)}</span></div><div><span class="eyebrow">Net</span><span class="num ${t.inc-t.exp>=0?"pos":"neg"}">${compact(t.inc-t.exp)}</span></div></div>
-      <p class="status-line" style="margin:-4px 0 0">${esc(periodName())}. All time net: <span class="num">${tsh(all.inc-all.exp)}</span></p>
+      <div class="mini"><div><span class="eyebrow">Earned</span><span class="num pos">${compact(t.inc)}</span></div><div><span class="eyebrow">Spent</span><span class="num neg">${compact(t.exp)}</span></div><div><span class="eyebrow">Net</span><span class="num ${t.net>=0?"pos":"neg"}">${compact(t.net)}</span></div><div><span class="eyebrow">Margin</span><span class="num ${pctCls(margin(t.net,t.inc))}">${pctTxt(margin(t.net,t.inc))}</span></div><div><span class="eyebrow">Distance</span><span class="num">${kmTxt(t.km)}</span></div><div><span class="eyebrow">TSh/km</span><span class="num">${perKm(t)!=null?NF.format(Math.round(perKm(t))):"—"}</span></div></div>
+      <p class="status-line" style="margin:-4px 0 0">${esc(periodName())}. All time: net <span class="num">${tsh(all.net)}</span>, margin <span class="num">${pctTxt(margin(all.net,all.inc))}</span>, ${kmTxt(all.km)}.</p>
       ${v.notes?`<p class="muted" style="margin:0;font-size:.88rem">${esc(v.notes)}</p>`:""}
       ${S.canWrite?`<div class="actions"><button class="btn small primary" type="button" data-act="new-entry" data-type="income" data-vehicle="${v.id}">+ Hesabu</button><button class="btn small" type="button" data-act="new-entry" data-type="expense" data-vehicle="${v.id}">+ Expense</button><button class="btn small ghost" type="button" data-act="edit-vehicle" data-id="${v.id}">Edit</button></div>`:""}
     </article>`}).join("")}</div>`;
@@ -339,9 +382,10 @@ function viewDrivers(){
     const mine=S.entries.filter(e=>e.driverId===d.id);
     const paid=mine.filter(e=>e.type==="income"&&e.category==="Weekly hesabu").reduce((a,e)=>a+num(e.amount),0);
     const fines=mine.filter(e=>e.category==="Traffic fine"),acc=mine.filter(e=>e.category==="Accident");
+    const dt=sums(mine),dm=margin(dt.net,dt.inc),rank=driverStats(S.entries.filter(e=>inPeriod(e.date))).findIndex(r=>r.id===d.id);
     const last=mine.filter(e=>e.category==="Weekly hesabu").map(e=>e.date).sort().pop();
     return `<article class="card">
-      <div class="card-head"><h3>${esc(d.name)}</h3><span>${d.example?'<span class="chip ex">Example</span> ':""}${d.status==="inactive"?'<span class="chip">Former driver</span>':car?'<span class="chip good">Driving</span>':'<span class="chip warn">No car</span>'}</span></div>
+      <div class="card-head"><h3>${esc(d.name)}</h3><span>${rank===0?'<span class="chip top">Top driver</span> ':""}${d.example?'<span class="chip ex">Example</span> ':""}${d.status==="inactive"?'<span class="chip">Former driver</span>':car?'<span class="chip good">Driving</span>':'<span class="chip warn">No car</span>'}</span></div>
       <dl class="kv">
         <dt>Car</dt><dd>${car?`<span class="plate">${esc(car.plate)}</span>`:"—"}</dd>
         <dt>Phone</dt><dd>${d.phone?`<span class="num" style="user-select:all">${esc(d.phone)}</span> <button class="btn small ghost" type="button" data-act="copy" data-text="${esc(d.phone)}" aria-label="Copy phone number">Copy</button>`:"—"}</dd>
@@ -349,7 +393,7 @@ function viewDrivers(){
         <dt>Deposit held</dt><dd class="num">${d.deposit?tsh(d.deposit):"—"}</dd>
         <dt>Started</dt><dd>${fmtDate(d.startDate)}</dd>
       </dl>
-      <div class="mini"><div><span class="eyebrow">Hesabu paid</span><span class="num pos">${compact(paid)}</span></div><div><span class="eyebrow">Fines</span><span class="num ${fines.length?"neg":""}">${fines.length}</span></div><div><span class="eyebrow">Accidents</span><span class="num ${acc.length?"neg":""}">${acc.length}</span></div></div>
+      <div class="mini"><div><span class="eyebrow">Hesabu paid</span><span class="num pos">${compact(paid)}</span></div><div><span class="eyebrow">Brought in</span><span class="num ${dt.net>=0?"pos":"neg"}">${compact(dt.net)}</span></div><div><span class="eyebrow">Margin</span><span class="num ${pctCls(dm)}">${pctTxt(dm)}</span></div><div><span class="eyebrow">Distance</span><span class="num">${kmTxt(dt.km)}</span></div><div><span class="eyebrow">Fines</span><span class="num ${fines.length?"neg":""}">${fines.length}</span></div><div><span class="eyebrow">Accidents</span><span class="num ${acc.length?"neg":""}">${acc.length}</span></div></div>
       <p class="status-line" style="margin:-4px 0 0">Last hesabu: ${last?fmtDate(last):"none yet"}. All time.</p>
       ${d.notes?`<p class="muted" style="margin:0;font-size:.88rem">${esc(d.notes)}</p>`:""}
       ${S.canWrite?`<div class="actions"><button class="btn small" type="button" data-act="edit-driver" data-id="${d.id}">Update driver</button></div>`:""}
@@ -360,7 +404,7 @@ function viewDrivers(){
 function entryRow(e){
   const inc=e.type==="income";
   return `<div class="entry"><span class="date">${fmtDate(e.date)}</span>
-    <div class="what"><span class="chip ${inc?"good":e.category==="Accident"||e.category==="Traffic fine"?"bad":""}">${esc(e.category)}</span> ${e.vehicleId?`<span class="plate" style="font-size:.8rem">${esc(vName(e.vehicleId))}</span>`:""} ${e.driverId?`<span class="muted" style="font-size:.85rem">${esc(dName(e.driverId))}</span>`:""}${e.example?' <span class="chip ex">Example</span>':""}${e.note?`<div class="note">${esc(e.note)}</div>`:""}</div>
+    <div class="what"><span class="chip ${inc?"good":e.category==="Accident"||e.category==="Traffic fine"?"bad":""}">${esc(e.category)}</span> ${e.vehicleId?`<span class="plate" style="font-size:.8rem">${esc(vName(e.vehicleId))}</span>`:""} ${e.driverId?`<span class="muted" style="font-size:.85rem">${esc(dName(e.driverId))}</span>`:""}${num(e.distanceKm)>0?` <span class="km">${NF.format(num(e.distanceKm))} km</span>`:""}${e.example?' <span class="chip ex">Example</span>':""}${e.note?`<div class="note">${esc(e.note)}</div>`:""}</div>
     <span class="amt ${inc?"pos":"neg"}">${inc?"+":"−"}${NF.format(num(e.amount))}</span>
     <span class="ops">${S.canWrite?`<button class="btn small ghost" type="button" data-act="edit-entry" data-id="${e.id}">Edit</button><button class="btn small ghost" type="button" data-act="ask-delete" data-kind="entries" data-id="${e.id}" aria-label="Delete entry">Delete</button>`:""}</span></div>`;
 }
@@ -475,6 +519,7 @@ function renderModal(){
         <div class="field"><label for="eDate">Date</label><input id="eDate" name="date" type="date" required value="${esc(e.date||todayISO())}"></div>
         <div class="field"><label for="eVeh">Vehicle</label><select id="eVeh" name="vehicleId">${opt("","Whole business",!e.vehicleId)}${S.vehicles.map(v=>opt(v.id,v.plate,v.id===e.vehicleId)).join("")}</select></div>
         <div class="field full"><label for="eDrv">Driver</label><select id="eDrv" name="driverId">${opt("","None",!e.driverId)}${S.drivers.map(d=>opt(d.id,d.name,d.id===e.driverId)).join("")}</select><span class="hint">Filled in from the car's current driver. Change it if someone else was driving.</span></div>
+        ${type==="income"?`<div class="field full"><label for="eKm">Distance since last collection (km)</label><input id="eKm" name="distanceKm" inputmode="decimal" placeholder="e.g. 1240" value="${esc(e.distanceKm||"")}"><span class="hint" id="eKmHint">Read it from the GPS tracking app for this car${lastKmHint(e.vehicleId)}</span></div>`:""}
         <div class="field full"><label for="eNote">Note</label><textarea id="eNote" name="note" placeholder="${type==="income"?"Week of 3–9 Nov, paid by M-Pesa":"Garage, police ref., insurance claim no.…"}">${esc(e.note||"")}</textarea></div>
       </div>
       <div class="sheet-foot"><button class="btn" type="button" data-act="close">Cancel</button><button class="btn primary" type="submit">${m.id?"Save changes":"Save entry"}</button></div>
@@ -504,7 +549,7 @@ document.addEventListener("click",async ev=>{
       const form=document.getElementById("entryForm");const keep=formData(form);
       S.modal.curType=b.dataset.type;renderModal();
       const f=document.getElementById("entryForm");
-      for(const k of ["amount","date","vehicleId","driverId","note"])if(f.elements[k]&&keep[k]!=null)f.elements[k].value=keep[k];
+      for(const k of ["amount","date","vehicleId","driverId","note","distanceKm"])if(f.elements[k]&&keep[k]!=null)f.elements[k].value=keep[k];
       if(b.dataset.type==="income")f.elements.category.value="Weekly hesabu";
       break;}
     case "ask-delete":{
@@ -524,7 +569,7 @@ document.addEventListener("change",ev=>{
   const t=ev.target;
   if(t.id==="periodMonth"){if(t.value){S.period=t.value;render()}return}
   if(t.dataset&&t.dataset.filter){S.filter[t.dataset.filter]=t.value;if(t.dataset.filter==="type")S.filter.cat="";render();return}
-  if(t.id==="eVeh"){const v=vById(t.value);const drv=document.getElementById("eDrv");if(drv)drv.value=v&&v.driverId?v.driverId:"";
+  if(t.id==="eVeh"){const kh=document.getElementById("eKmHint");if(kh)kh.textContent="Read it from the GPS tracking app for this car"+lastKmHint(t.value);const v=vById(t.value);const drv=document.getElementById("eDrv");if(drv)drv.value=v&&v.driverId?v.driverId:"";
     const amt=document.getElementById("eAmt"),cat=document.getElementById("eCat");if(v&&amt&&!amt.value&&cat&&cat.value==="Weekly hesabu")amt.value=num(v.weeklyTarget)||cfg().defaultTarget}
 });
 document.addEventListener("keydown",ev=>{if(ev.key==="Escape"&&S.modal)closeModal()});
@@ -562,7 +607,9 @@ document.addEventListener("submit",async ev=>{
     if(amt<=0){toast("Enter an amount above zero.");return}
     if(!o.date){toast("Choose a date.");return}
     const id=S.modal.id||newId("entries");const prev=S.entries.find(x=>x.id===id)||{};
-    const body=clean({type:o.type,category:o.category,amount:amt,date:o.date,vehicleId:o.vehicleId||"",driverId:o.driverId||"",note:o.note,example:prev.example||undefined,createdAt:prev.createdAt||Date.now()});
+    const km=o.type==="income"&&o.distanceKm!==""&&o.distanceKm!=null?num(o.distanceKm):"";
+    if(km!==""&&km<0){toast("Distance can't be negative.");return}
+    const body=clean({type:o.type,category:o.category,amount:amt,date:o.date,vehicleId:o.vehicleId||"",driverId:o.driverId||"",note:o.note,distanceKm:km,example:prev.example||undefined,createdAt:prev.createdAt||Date.now()});
     if(!(await save("entries",id,body)))return;
     closeModal();toast(o.type==="income"?"Earnings recorded":"Expense recorded");
   });
@@ -588,8 +635,8 @@ document.addEventListener("submit",async ev=>{
 
 async function exportCSV(){
   if(!S.downloads)return;
-  const rows=[["Date","Type","Category","Amount (TSh)","Vehicle","Driver","Note"]];
-  for(const e of filteredEntries())rows.push([e.date,e.type==="income"?"Earnings":"Expense",e.category,num(e.amount),vName(e.vehicleId),dName(e.driverId),e.note||""]);
+  const rows=[["Date","Type","Category","Amount (TSh)","Distance (km)","Vehicle","Driver","Note"]];
+  for(const e of filteredEntries())rows.push([e.date,e.type==="income"?"Earnings":"Expense",e.category,num(e.amount),num(e.distanceKm)||"",vName(e.vehicleId),dName(e.driverId),e.note||""]);
   const csv=rows.map(r=>r.map(v=>{v=String(v==null?"":v);return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v}).join(",")).join("\n");
   const url=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
   const a=document.createElement("a");a.href=url;a.download=`fleet-entries-${S.period}.csv`;

@@ -46,6 +46,7 @@ create table if not exists public.entries (
   vehicle_id  uuid references public.vehicles (id) on delete set null,
   driver_id   uuid references public.drivers (id) on delete set null,
   note        text,
+  distance_km numeric(10,1) check (distance_km is null or distance_km >= 0), -- km since last collection, from the GPS app
   created_at  timestamptz not null default now()
 );
 
