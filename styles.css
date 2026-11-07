@@ -216,3 +216,7 @@ code{font-family:var(--f-num);font-size:.9em;background:var(--surface-2);padding
 @media (max-width:520px){.theme-switch{order:3}}
 .gauge-mark.above span{top:auto;bottom:100%;margin:0 0 3px}
 .gauge{padding-top:16px}
+
+/* form errors */
+.form-error{margin:0;padding:10px 12px;border-radius:8px;background:var(--bad-bg);color:var(--bad);border-left:4px solid var(--bad);font-weight:600}
+.field [aria-invalid="true"]{border-color:var(--bad);outline:2px solid var(--bad);outline-offset:0}

@@ -53,6 +53,16 @@ const NF = new Intl.NumberFormat("en-US",{maximumFractionDigits:0});
 function tsh(n){n=Math.round(+n||0);return (n<0?"−":"")+"TSh "+NF.format(Math.abs(n))}
 function compact(n){const a=Math.abs(n),s=n<0?"−":"";if(a>=1e6)return s+(a/1e6).toFixed(a>=1e7?1:2).replace(/\.?0+$/,"")+"M";if(a>=1e3)return s+Math.round(a/1e3)+"k";return s+Math.round(a)}
 function num(v){const n=parseFloat(String(v).replace(/[, ]/g,""));return isFinite(n)?n:0}
+// Reads money as people type it: "45000", "45,000", "TSh 45,000", "45.000", "45k", "1.2m"
+function parseAmount(v){
+  let s=String(v==null?"":v).toLowerCase().replace(/tsh|tzs|sh\.?|\s/g,"");
+  let mult=1;
+  if(/k$/.test(s)){mult=1e3;s=s.slice(0,-1)} else if(/m$/.test(s)){mult=1e6;s=s.slice(0,-1)}
+  if(/^\d{1,3}(\.\d{3})+$/.test(s))s=s.replace(/\./g,"");   // 45.000 = forty-five thousand
+  s=s.replace(/,/g,"");
+  if(!/^\d*\.?\d+$/.test(s))return NaN;
+  return parseFloat(s)*mult;
+}
 function cfg(){return Object.assign({},DEFAULTS,S.settings||{})}
 function monthsBetween(a,b){const[ay,am]=a.split("-").map(Number),[by,bm]=b.split("-").map(Number);return (by-ay)*12+(bm-am)}
 function addMonths(k,n){let[y,m]=k.split("-").map(Number);m+=n;y+=Math.floor((m-1)/12);m=((m-1)%12+12)%12+1;return y+"-"+pad(m)}
@@ -108,13 +118,27 @@ function activeVehicles(){return S.vehicles.filter(v=>v.status!=="inactive")}
 
 /* ---------- toast ---------- */
 let toastT;
-function toast(msg){const t=document.getElementById("toast");t.textContent=msg;t.hidden=false;clearTimeout(toastT);toastT=setTimeout(()=>t.hidden=true,2600)}
+function toast(msg){const t=document.getElementById("toast");t.textContent=msg;t.hidden=false;clearTimeout(toastT);toastT=setTimeout(()=>t.hidden=true,4500)}
+function formError(form,msg,fieldId){
+  if(!form||!form.isConnected){toast(msg);return}
+  let el=form.querySelector(".form-error");
+  if(!el){el=document.createElement("p");el.className="form-error";el.setAttribute("role","alert");form.insertBefore(el,form.firstChild)}
+  el.textContent=msg;
+  const f=fieldId&&document.getElementById(fieldId);
+  if(f){f.setAttribute("aria-invalid","true");f.focus()}
+  el.scrollIntoView({block:"nearest"});
+}
+let lastWriteError="";
+window.addEventListener("error",e=>{toast("Something went wrong: "+((e.error&&e.error.message)||e.message||"unknown error"))});
+window.addEventListener("unhandledrejection",e=>{const r=e.reason;toast("Something went wrong: "+((r&&r.message)||String(r)))});
 
 /* ---------- data writes ---------- */
 async function save(col,id,body){
-  if(!S.sb||!S.user){toast("Sign in to save changes.");return false}
+  lastWriteError="";
+  if(!S.sb||!S.user){lastWriteError="You're signed out. Sign in again to save.";toast(lastWriteError);return false}
   const row=toRow(col,body);row.id=id;
-  const {error}=await S.sb.from(col).upsert(row);
+  let error;
+  try{({error}=await S.sb.from(col).upsert(row))}catch(e){error=e}
   if(error){handleWriteError(error);return false}
   applyLocal(col,id,body);
   return true;
@@ -136,10 +160,12 @@ function applyLocal(col,id,body){
 }
 function handleWriteError(e){
   const msg=(e&&(e.message||e.details))||"";
-  if(e&&e.code==="23505")toast("That driver is already on another car. Remove them from it first.");
-  else if(/JWT|auth|permission|row-level/i.test(msg))toast("Your session has expired. Sign in again.");
-  else if(/fetch|network/i.test(msg))toast("Couldn't reach the server. Check your connection.");
-  else toast("That change wasn't saved: "+msg.slice(0,80));
+  let out;
+  if(e&&e.code==="23505")out="That driver is already on another car. Remove them from it first.";
+  else if(/JWT|auth|permission|row-level/i.test(msg))out="Your session has expired. Sign out, sign in again, and retry.";
+  else if(/fetch|network/i.test(msg))out="Couldn't reach the server. Check your connection and try again.";
+  else out="That change wasn't saved: "+msg.slice(0,120);
+  lastWriteError=out;toast(out);
 }
 function newId(){return (crypto.randomUUID?crypto.randomUUID():"xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,c=>{const r=Math.random()*16|0;return (c==="x"?r:(r&3|8)).toString(16)}))}
 function clean(o){const r={};for(const k in o){if(o[k]!==undefined)r[k]=o[k]}return r}
@@ -579,7 +605,15 @@ document.addEventListener("submit",async ev=>{
   ev.preventDefault();
   const form=ev.target;const btn=form.querySelector('[type="submit"]');
   if(btn&&btn.disabled)return;
-  const go=async fn=>{if(btn)btn.disabled=true;try{await fn()}finally{if(btn)btn.disabled=false}};
+  const old=form.querySelector(".form-error");if(old)old.remove();
+  form.querySelectorAll("[aria-invalid]").forEach(x=>x.removeAttribute("aria-invalid"));
+  const label=btn?btn.textContent:"";
+  const go=async fn=>{
+    if(btn){btn.disabled=true;btn.textContent="Saving…"}
+    try{await fn()}
+    catch(e){console.error(e);formError(form,"Couldn't save: "+((e&&e.message)||e)+". Please tell us this message if it keeps happening.")}
+    finally{if(btn&&btn.isConnected){btn.disabled=false;btn.textContent=label}}
+  };
   if(form.id==="vehicleForm")await go(async()=>{
     const o=formData(form);if(!o.plate){toast("Enter the plate number.");return}
     const id=S.modal.id||newId("vehicles");const prev=vById(id)||{};
@@ -587,14 +621,14 @@ document.addEventListener("submit",async ev=>{
     const history=(prev.history||[]).slice();if(changed)history.push({driverId:o.driverId||"",from:todayISO()});
     const body=clean({plate:o.plate.toUpperCase(),model:o.model,year:o.year,purchasePrice:num(o.purchasePrice)||0,purchaseDate:o.purchaseDate,weeklyTarget:num(o.weeklyTarget)||cfg().defaultTarget,status:o.status,driverId:o.driverId||"",history,notes:o.notes,example:prev.example||undefined,createdAt:prev.createdAt||Date.now()});
     if(changed&&o.driverId)await releaseDriver(o.driverId,id);
-    if(!(await save("vehicles",id,body)))return;
+    if(!(await save("vehicles",id,body))){formError(form,lastWriteError||"The vehicle wasn't saved. Try again.");return}
     closeModal();toast(prev.plate?"Vehicle saved":"Vehicle added");
   });
   else if(form.id==="driverForm")await go(async()=>{
     const o=formData(form);if(!o.name){toast("Enter the driver's name.");return}
     const id=S.modal.id||newId("drivers");const prev=dById(id)||{};
     const body=clean({name:o.name,phone:o.phone,licenceNo:o.licenceNo,nida:o.nida,deposit:num(o.deposit)||0,startDate:o.startDate,status:o.status,notes:o.notes,example:prev.example||undefined,createdAt:prev.createdAt||Date.now()});
-    if(!(await save("drivers",id,body)))return;
+    if(!(await save("drivers",id,body))){formError(form,lastWriteError||"The driver wasn't saved. Try again.");return}
     const cur=S.vehicles.find(v=>v.driverId===id);
     const want=o.status==="inactive"?"":o.vehicleId;
     if((cur?cur.id:"")!==want){
@@ -603,15 +637,16 @@ document.addEventListener("submit",async ev=>{
     closeModal();toast(prev.name?"Driver updated":"Driver added");
   });
   else if(form.id==="entryForm")await go(async()=>{
-    const o=formData(form);const amt=num(o.amount);
-    if(amt<=0){toast("Enter an amount above zero.");return}
-    if(!o.date){toast("Choose a date.");return}
+    const o=formData(form);const amt=parseAmount(o.amount);
+    if(!o.amount){formError(form,"Enter the amount in TSh, for example 45000.","eAmt");return}
+    if(!(amt>0)){formError(form,`"${o.amount}" isn't an amount we can read. Type digits only, for example 45000 or 45,000.`,"eAmt");return}
+    if(!o.date){formError(form,"Choose the date of this entry.","eDate");return}
     const id=S.modal.id||newId("entries");const prev=S.entries.find(x=>x.id===id)||{};
-    const km=o.type==="income"&&o.distanceKm!==""&&o.distanceKm!=null?num(o.distanceKm):"";
-    if(km!==""&&km<0){toast("Distance can't be negative.");return}
+    let km="";
+    if(o.type==="income"&&o.distanceKm){km=parseAmount(o.distanceKm);if(!(km>=0)){formError(form,"Enter the distance as a number of km, for example 1240.","eKm");return}}
     const body=clean({type:o.type,category:o.category,amount:amt,date:o.date,vehicleId:o.vehicleId||"",driverId:o.driverId||"",note:o.note,distanceKm:km,example:prev.example||undefined,createdAt:prev.createdAt||Date.now()});
-    if(!(await save("entries",id,body)))return;
-    closeModal();toast(o.type==="income"?"Earnings recorded":"Expense recorded");
+    if(!(await save("entries",id,body))){formError(form,lastWriteError||"That entry wasn't saved. Try again.");return}
+    closeModal();toast(o.type==="income"?`Earnings of ${tsh(amt)} recorded`:`Expense of ${tsh(amt)} recorded`);
   });
   else if(form.id==="loanForm")await go(async()=>{
     const o=formData(form);
