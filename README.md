@@ -23,12 +23,9 @@ It is a plain static site (HTML, CSS, JavaScript, no build step) hosted on **Net
 
 ## Setup
 
-### 1. Database (Supabase)
+### 1. Database (Supabase) — already done
 
-1. Create a Supabase project.
-2. Open **SQL Editor**, paste the contents of `supabase/schema.sql`, and run it.
-3. Go to **Project Settings → API** and copy the **Project URL** and the **publishable key** (or legacy anon key).
-4. Put both into `config.js` and commit.
+The Supabase project **Fleet Ledger** (`zprtwbaaetkxhpiiwjas`, Frankfurt) is set up with `supabase/schema.sql`, and `config.js` already points at it. To rebuild it elsewhere: create a project, run `supabase/schema.sql` in the SQL Editor, and put the new Project URL and anon/publishable key into `config.js`.
 
 The publishable key is meant to be public. Row-level security in the schema means each account can only read and change its own records.
 
